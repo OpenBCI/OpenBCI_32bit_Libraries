@@ -1,3 +1,9 @@
+# v3.1.3
+
+### Bug Fixes
+
+- Fixed impedance measurement following sample rate changes
+
 # v3.1.2
 
 ### Bug Fixes

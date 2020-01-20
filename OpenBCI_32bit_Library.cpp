@@ -314,25 +314,12 @@ boolean OpenBCI_32bit_Library::processChar(char character)
       {
         removeDaisy();
       }
-      else if (wifi.present && wifi.tx)
-      {
-        wifi.sendStringLast("No daisy to remove");
-      }
       break;
     case OPENBCI_CHANNEL_MAX_NUMBER_16: // use 16 channel mode
       if (daisyPresent == false)
       {
         attachDaisy();
       }
-      if (daisyPresent)
-      {
-        printAll("16");
-      }
-      else
-      {
-        printAll("8");
-      }
-      sendEOT();
       break;
 
     // STREAM DATA AND FILTER COMMANDS
@@ -348,15 +335,13 @@ boolean OpenBCI_32bit_Library::processChar(char character)
         iSerial0.tx = false;
       }
       // Reads if the command is not from the SPI port and we are not in debug mode
-      if (!commandFromSPI && !iSerial1.tx)
+      if (!commandFromSPI && !iSerial1.tx && curSampleRate != SAMPLE_RATE_250)
       {
-        // If the sample rate is higher than 250, we need to drop down to 250Hz
-        //  to not break the RFduino system that can't handle above 250SPS.
-        if (curSampleRate != SAMPLE_RATE_250)
-        {
-          streamSafeSetSampleRate(SAMPLE_RATE_250);
-          delay(50);
-        }
+        // If the sample rate is higher than 250, we can not stream data
+        // to not break the RFduino system that can't handle above 250SPS.
+        printSerial("SPS over 250, will not stream data");
+        sendEOT();
+        delay(10);
       }
       streamStart(); // turn on the fire hose
       break;
@@ -469,7 +454,7 @@ boolean OpenBCI_32bit_Library::processChar(char character)
       sendEOT();
       break;
     case OPENBCI_GET_VERSION:
-      printAll("v3.1.2");
+      printAll("v3.1.2-freeSD");
       sendEOT();
       break;
     default:
@@ -802,7 +787,7 @@ void OpenBCI_32bit_Library::boardReset(void)
   }
   printAll("LIS3DH Device ID: 0x");
   printlnHex(LIS3DH_getDeviceID());
-  printlnAll("Firmware: v3.1.2");
+  printlnAll("Firmware: v3.1.2-freeSD");
   sendEOT();
   delay(5);
   wifi.reset();
@@ -1456,41 +1441,43 @@ void OpenBCI_32bit_Library::sendChannelData(PACKET_TYPE packetType)
   }
   else
   {
-    // Send over bluetooth
-    if (curBoardMode == BOARD_MODE_BLE)
-    {
-      if (sampleCounter % 2 != 0)
-      { //CHECK SAMPLE ODD-EVEN AND SEND THE APPROPRIATE ADS DATA
-        if (!(bufferBLE + ringBufBLEHead)->flushing)
-        {
-          for (int i = 0; i < 6; i++)
+    if (curSampleRate == SAMPLE_RATE_250)
+    { // Send over bluetooth only if SPS == 250 to not break the RFduino system
+      if (curBoardMode == BOARD_MODE_BLE)
+      {
+        if (sampleCounter % 2 != 0)
+        { //CHECK SAMPLE ODD-EVEN AND SEND THE APPROPRIATE ADS DATA
+          if (!(bufferBLE + ringBufBLEHead)->flushing)
           {
-            // Serial1.printf("\n<- h: %d t: %d i: %d c->bL: %d\n", ringBufBLEHead, ringBufBLETail, i, (bufferBLE + ringBufBLEHead)->bytesLoaded);
-            if ((bufferBLE + ringBufBLEHead)->bytesLoaded == 0)
+            for (int i = 0; i < 6; i++)
             {
-              (bufferBLE + ringBufBLEHead)->sampleNumber = sampleCounterBLE;
-            }
-            (bufferBLE + ringBufBLEHead)->data[(bufferBLE + ringBufBLEHead)->bytesLoaded++] = meanBoardDataRaw[i];
-            if ((bufferBLE + ringBufBLEHead)->bytesLoaded >= BLE_TOTAL_DATA_BYTES)
-            {
-              // Serial1.println("Moving head");
-              (bufferBLE + ringBufBLEHead)->ready = true;
-              sampleCounterBLE += 3;
-              ringBufBLEHead++;
-              if (ringBufBLEHead >= BLE_RING_BUFFER_SIZE)
+              // Serial1.printf("\n<- h: %d t: %d i: %d c->bL: %d\n", ringBufBLEHead, ringBufBLETail, i, (bufferBLE + ringBufBLEHead)->bytesLoaded);
+              if ((bufferBLE + ringBufBLEHead)->bytesLoaded == 0)
               {
-                ringBufBLEHead = 0;
+                (bufferBLE + ringBufBLEHead)->sampleNumber = sampleCounterBLE;
+              }
+              (bufferBLE + ringBufBLEHead)->data[(bufferBLE + ringBufBLEHead)->bytesLoaded++] = meanBoardDataRaw[i];
+              if ((bufferBLE + ringBufBLEHead)->bytesLoaded >= BLE_TOTAL_DATA_BYTES)
+              {
+                // Serial1.println("Moving head");
+                (bufferBLE + ringBufBLEHead)->ready = true;
+                sampleCounterBLE += 3;
+                ringBufBLEHead++;
+                if (ringBufBLEHead >= BLE_RING_BUFFER_SIZE)
+                {
+                  ringBufBLEHead = 0;
+                }
               }
             }
           }
         }
+        sendChannelDataSerialBLE(packetType);
       }
-      sendChannelDataSerialBLE(packetType);
-    }
-    else
-    {
-      if (iSerial0.tx || iSerial1.tx)
-        sendChannelDataSerial(packetType);
+      else
+      {
+        if (iSerial0.tx || iSerial1.tx)
+          sendChannelDataSerial(packetType);
+      }
     }
   }
 
@@ -1509,6 +1496,7 @@ void OpenBCI_32bit_Library::sendChannelData(PACKET_TYPE packetType)
 */
 void OpenBCI_32bit_Library::sendChannelDataSerialBLE(PACKET_TYPE packetType)
 {
+
   static int delayPeriod = 0;
   unsigned long startTime = micros();
   if ((bufferBLE + ringBufBLETail)->ready && (bufferBLE + ringBufBLETail)->bytesFlushed == 0)
@@ -1939,7 +1927,7 @@ void OpenBCI_32bit_Library::initialize_ads()
   delay(40);
   resetADS(BOARD_ADS); // reset the on-board ADS registers, and stop DataContinuousMode
   delay(10);
-  WREG(CONFIG1, (ADS1299_CONFIG1_DAISY | curSampleRate), BOARD_ADS); // tell on-board ADS to output its clk, set the data rate to 250SPS
+  WREG(CONFIG1, (ADS1299_CONFIG1_DAISY | curSampleRate), BOARD_ADS); // tell on-board ADS to output its clk, set the data rate
   delay(40);
   resetADS(DAISY_ADS); // software reset daisy module if present
   delay(10);
@@ -1952,7 +1940,7 @@ void OpenBCI_32bit_Library::initialize_ads()
   else
   {
     numChannels = 16;                                                      // expect up to 16 ADS channels
-    WREG(CONFIG1, (ADS1299_CONFIG1_DAISY_NOT | curSampleRate), DAISY_ADS); // tell on-board ADS to output its clk, set the data rate to 250SPS
+    WREG(CONFIG1, (ADS1299_CONFIG1_DAISY_NOT | curSampleRate), DAISY_ADS); // tell Daisy ADS to not output its clk, set the data rate
     delay(40);
   }
 
@@ -2265,7 +2253,7 @@ void OpenBCI_32bit_Library::removeDaisy(void)
 
 void OpenBCI_32bit_Library::attachDaisy(void)
 {
-  WREG(CONFIG1, (ADS1299_CONFIG1_DAISY | curSampleRate), BOARD_ADS); // tell on-board ADS to output the clk, set the data rate to 250SPS
+  WREG(CONFIG1, (ADS1299_CONFIG1_DAISY | curSampleRate), BOARD_ADS); // tell on-board ADS to output the clk, set the data rate
   delay(40);
   resetADS(DAISY_ADS); // software reset daisy module if present
   delay(10);
@@ -2277,6 +2265,7 @@ void OpenBCI_32bit_Library::attachDaisy(void)
     if (!isRunning)
     {
       printAll("no daisy to attach!");
+      sendEOT();
     }
   }
   else
@@ -2285,6 +2274,7 @@ void OpenBCI_32bit_Library::attachDaisy(void)
     if (!isRunning)
     {
       printAll("daisy attached");
+      sendEOT();
     }
   }
 }
